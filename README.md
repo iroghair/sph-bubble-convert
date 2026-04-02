@@ -214,44 +214,12 @@ The `scripts/script.sh` shell script provides a polling loop that watches for ne
 | File | Description |
 |------|-------------|
 | `scripts/script.sh` | Bash polling loop for production use. Watches for `.ft3` files, moves them to a conversion directory, invokes the C++ converter, and cleans up. |
-| `implementation_plan.md` | Original design document describing the Python-to-C++ migration plan. |
-| `probelocs.csv` | Probe location data for the simulation domain. |
 | `input/F28310.ft3` | Sample FT3 file (cycle 28310) used for testing. |
-| `test_input/`, `test_output/` | Directories for validation test data and converter output. |
-| `4mm_eps15_0.2start/`, `4mm_eps15_end/` | Additional FT3 snapshots at different simulation stages. |
-| `output/` | VTU/VTK visualisation files for bubble and point data. |
-| `GLS3D_rev8_8` | Front-Tracking simulation solver binary. |
 
 ---
 
 ## Future Work
 
-### Point Cloud Input Support
-
-The current pipeline is tightly coupled to the FT3 binary format. A natural extension is to support arbitrary point cloud inputs for the SH decomposition, independent of the simulation file format:
-
-- Accept generic point cloud formats (PLY, XYZ, OBJ, CSV with vertex coordinates) as input alongside or instead of FT3 files.
-- Decouple the SH fitting engine from the FT3 reader, exposing it as a standalone library or command-line tool that takes vertex coordinates on stdin or from a file.
-- Support pre-segmented point clouds where each bubble/object is already identified, as well as unsegmented clouds requiring clustering.
-
-### Configuration File
-
-Replace or supplement CLI flags with a configuration file (YAML or TOML) for fine-grained control over the processing pipeline:
-
-- Per-simulation parameters: `l_max`, Legendre method, thread count, output precision.
-- Input/output path mappings and naming conventions.
-- Filtering criteria: minimum bubble size, vertex count thresholds for degenerate bubble handling.
-- Velocity computation options: forward difference, backward difference, or central difference schemes.
-- Batch processing profiles for different simulation campaigns.
-
-### GUI for Visualising Input and Output Shapes
-
-A graphical front-end for interactive inspection of the pipeline inputs and outputs:
-
-- **3D mesh viewer**: Display the raw triangular bubble meshes extracted from FT3 files, with per-bubble colouring and selection.
-- **SH reconstruction overlay**: Reconstruct the bubble surface from the computed SH weights and overlay it on the original mesh to visually assess fit quality.
-- **Residual heatmap**: Colour each vertex by the radial residual $|r_{\text{actual}} - r_{\text{SH}}|$ to identify regions of poor fit.
-- **Coefficient explorer**: Interactive bar chart or polar plot of the SH weight spectrum per bubble, allowing identification of dominant modes.
-- **Time series animation**: Scrub through timesteps to visualise bubble deformation, translation, and velocity fields over time.
-
-Candidate frameworks include Qt + VTK for a native desktop application, or a Python-based tool using PyVista/`pyvistaqt` that reads the C++ CSV output directly.
+[ ] Point Cloud Input Support
+[ ] Configuration File
+[ ] GUI for Visualising Input and Output Shapes
