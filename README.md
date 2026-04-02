@@ -220,6 +220,6 @@ The `scripts/script.sh` shell script provides a polling loop that watches for ne
 
 ## Future Work
 
-[ ] Point Cloud Input Support
-[ ] Configuration File
-[ ] GUI for Visualising Input and Output Shapes
+* [ ] Point Cloud Input Support
+* [ ] Configuration File
+* [ ] GUI for Visualising Input and Output Shapes
