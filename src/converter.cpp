@@ -238,22 +238,37 @@ static void write_csv(
     const std::vector<BubbleResult>& records,
     int l_max)
 {
-    std::ofstream f(path);
+    const int num_orbs = (l_max + 1) * (l_max + 1);
+    const bool file_exists = fs::exists(path);
+
+    // If appending, count existing data rows to continue the index
+    size_t start_index = 0;
+    if (file_exists) {
+        std::ifstream in(path);
+        std::string line;
+        bool header_skipped = false;
+        while (std::getline(in, line)) {
+            if (!header_skipped) { header_skipped = true; continue; }
+            if (!line.empty()) ++start_index;
+        }
+    }
+
+    std::ofstream f(path, file_exists ? std::ios::app : std::ios::out);
     if (!f) throw std::runtime_error("Cannot write CSV: " + path);
 
-    const int num_orbs = (l_max + 1) * (l_max + 1);
-
-    // Header: leading comma = pandas unnamed index column
-    f << ",id,stl,sim,bub_num,time [s],pos_x,pos_y,pos_z,"
-         "vel_x,vel_y,vel_z,l_max";
-    for (int j = 0; j < num_orbs; ++j) f << ",orb_" << j;
-    f << "\n";
+    // Write header only for new files
+    if (!file_exists) {
+        f << ",id,stl,sim,bub_num,time [s],pos_x,pos_y,pos_z,"
+             "vel_x,vel_y,vel_z,l_max";
+        for (int j = 0; j < num_orbs; ++j) f << ",orb_" << j;
+        f << "\n";
+    }
 
     f << std::setprecision(15);
 
     for (size_t i = 0; i < records.size(); ++i) {
         const auto& r = records[i];
-        f << i << ','
+        f << (start_index + i) << ','
           << r.id << ','
           << r.stl << ','
           << r.sim << ','
