@@ -42,7 +42,7 @@ def load_ft3(fname):
     ft3skip(fid, 4)
     time_val = ft3double(fid)
     time_rounded = round(time_val * 1e5)
-    ft3skip(fid, 24)
+    origin_shift = np.array([ft3double(fid) for _ in range(3)])
 
     nx = ft3int(fid); ft3skip(fid, 4)
     ny = ft3int(fid); ft3skip(fid, 4)
@@ -74,6 +74,7 @@ def load_ft3(fname):
 
     fid.close()
     return {
+        'origin_shift': origin_shift,
         'cycle': cycle, 'time': time_val, 'time_rounded': time_rounded,
         'nx': nx, 'ny': ny, 'nz': nz, 'dx': dx, 'dy': dy, 'dz': dz,
         'nph': nph, 'neli': neli, 'bubbles': bubbles
@@ -126,7 +127,7 @@ def main():
     for bi in range(data['neli']):
         bub = data['bubbles'][bi]
         center = bbox_center(bub.positions)
-        py_centers.append(center)
+        py_centers.append(center + data['origin_shift'])
 
         # Center positions
         pts = bub.positions - center

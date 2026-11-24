@@ -12,7 +12,7 @@
 //  Input  directory: flat folder containing *.ft3 files (same as convert_dir)
 //  Output directory: CSVs written here as <folder_name>.csv
 //
-//  Output CSV columns (matches stl_2_sph_harm_new.py):
+//  Output CSV columns:
 //    ,id,stl,sim,bub_num,time [s],pos_x,pos_y,pos_z,
 //    vel_x,vel_y,vel_z,l_max,orb_0,...,orb_{(lmax+1)^2-1}
 // ============================================================================
@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -29,6 +30,7 @@
 #endif
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <stdexcept>
@@ -92,7 +94,7 @@ static Config parse_args(int argc, char** argv)
 }
 
 // ============================================================================
-//  Per-bubble SH fit result — columns match stl_2_sph_harm_new.py output
+//  Per-bubble SH fit result — one CSV row
 // ============================================================================
 struct BubbleResult {
     std::string id;        // e.g. "32x6mm_eps10_0"
@@ -100,15 +102,27 @@ struct BubbleResult {
     std::string sim;       // folder name / sim label
     int    bub_num;        // bubble index within frame
     double time_s;         // time in seconds (round(raw*1e5)*1e-5)
-    double pos_x, pos_y, pos_z;   // bounding-box center (= PyVista center)
-    double vel_x, vel_y, vel_z;   // forward-difference velocity (filled later)
+    double pos_x, pos_y, pos_z;   // bounding-box center + window shift
+    // Forward-difference velocity; NaN (empty in CSV) if there is no next dump
+    double vel_x = std::numeric_limits<double>::quiet_NaN();
+    double vel_y = std::numeric_limits<double>::quiet_NaN();
+    double vel_z = std::numeric_limits<double>::quiet_NaN();
     int    l_max;
     std::vector<double> weights;   // (l_max+1)^2 elements
 };
 
 // ============================================================================
-//  Process a single FT3 frame → vector of BubbleResult (velocities = 0)
+//  Process a single FT3 frame → vector of BubbleResult
 // ============================================================================
+// Absolute position: mesh coordinates are relative to the (shifting) window
+static void set_position(BubbleResult& res, const std::array<double, 3>& ctr,
+                         const Ft3Frame& fr)
+{
+    res.pos_x = ctr[0] + fr.origin_shift[0];
+    res.pos_y = ctr[1] + fr.origin_shift[1];
+    res.pos_z = ctr[2] + fr.origin_shift[2];
+}
+
 static std::vector<BubbleResult> process_frame(
     const Ft3Frame& fr, int l_max,
     const std::string& folder_name,
@@ -162,8 +176,7 @@ static std::vector<BubbleResult> process_frame(
             res.sim = folder_name;
             res.bub_num = bi;
             res.time_s = time_s;
-            res.pos_x = ctr[0]; res.pos_y = ctr[1]; res.pos_z = ctr[2];
-            res.vel_x = res.vel_y = res.vel_z = 0.0;
+            set_position(res, ctr, fr);
             res.l_max = l_max;
             res.weights.assign(num_orbs, 0.0);
             continue;
@@ -187,8 +200,7 @@ static std::vector<BubbleResult> process_frame(
         res.sim = folder_name;
         res.bub_num = bi;
         res.time_s = time_s;
-        res.pos_x = ctr[0]; res.pos_y = ctr[1]; res.pos_z = ctr[2];
-        res.vel_x = res.vel_y = res.vel_z = 0.0;
+        set_position(res, ctr, fr);
         res.l_max = l_max;
         res.weights.resize(num_orbs);
         for (int j = 0; j < num_orbs; ++j) res.weights[j] = w(j);
@@ -197,10 +209,10 @@ static std::vector<BubbleResult> process_frame(
 }
 
 // ============================================================================
-//  Compute velocities via forward difference, grouped by bub_num.
-//  Matches stl_2_sph_harm_new.py :: get_velocities():
+//  Compute velocities via forward difference, grouped by bub_num:
 //    vel(t) = (pos(t+1) - pos(t)) / (time(t+1) - time(t))
-//    last timestep gets vel = 0 (fillna(0))
+//  pos includes the window shift, so this is the absolute velocity.
+//  The last dump of each bubble has no next dump and is left empty.
 // ============================================================================
 static void fill_velocities(std::vector<BubbleResult>& records)
 {
@@ -226,8 +238,16 @@ static void fill_velocities(std::vector<BubbleResult>& records)
                 cur.vel_z = (next.pos_z - cur.pos_z) / dt;
             }
         }
-        // Last entry in each group stays at vel = 0 (initialized)
     }
+}
+
+// Velocity CSV field: empty when undefined
+static std::string vel_field(double v)
+{
+    if (std::isnan(v)) return "";
+    std::ostringstream s;
+    s << std::setprecision(15) << v;
+    return s.str();
 }
 
 // ============================================================================
@@ -241,14 +261,25 @@ static void write_csv(
     const int num_orbs = (l_max + 1) * (l_max + 1);
     const bool file_exists = fs::exists(path);
 
-    // If appending, count existing data rows to continue the index
+    std::string header = ",id,stl,sim,bub_num,time [s],pos_x,pos_y,pos_z,"
+                         "vel_x,vel_y,vel_z,l_max";
+    for (int j = 0; j < num_orbs; ++j) header += ",orb_" + std::to_string(j);
+
+    // If appending, check the columns and count existing data rows to continue the index
     size_t start_index = 0;
     if (file_exists) {
         std::ifstream in(path);
         std::string line;
         bool header_skipped = false;
         while (std::getline(in, line)) {
-            if (!header_skipped) { header_skipped = true; continue; }
+            if (!header_skipped) {
+                if (line != header)
+                    throw std::runtime_error(
+                        path + " has different columns (for example another "
+                        "--lmax); move it away before converting");
+                header_skipped = true;
+                continue;
+            }
             if (!line.empty()) ++start_index;
         }
     }
@@ -258,10 +289,7 @@ static void write_csv(
 
     // Write header only for new files
     if (!file_exists) {
-        f << ",id,stl,sim,bub_num,time [s],pos_x,pos_y,pos_z,"
-             "vel_x,vel_y,vel_z,l_max";
-        for (int j = 0; j < num_orbs; ++j) f << ",orb_" << j;
-        f << "\n";
+        f << header << "\n";
     }
 
     f << std::setprecision(15);
@@ -275,7 +303,8 @@ static void write_csv(
           << r.bub_num << ','
           << r.time_s << ','
           << r.pos_x << ',' << r.pos_y << ',' << r.pos_z << ','
-          << r.vel_x << ',' << r.vel_y << ',' << r.vel_z << ','
+          << vel_field(r.vel_x) << ',' << vel_field(r.vel_y) << ','
+          << vel_field(r.vel_z) << ','
           << r.l_max;
         for (int j = 0; j < num_orbs; ++j) f << ',' << r.weights[j];
         f << '\n';
@@ -285,7 +314,7 @@ static void write_csv(
 // ============================================================================
 //  main
 // ============================================================================
-int main(int argc, char** argv)
+static int run(int argc, char** argv)
 {
     const Config cfg = parse_args(argc, argv);
 
@@ -370,4 +399,14 @@ int main(int argc, char** argv)
               << total_s << " s\n";
 
     return 0;
+}
+
+int main(int argc, char** argv)
+{
+    try {
+        return run(argc, argv);
+    } catch (const std::exception& e) {
+        std::cerr << "\nError: " << e.what() << "\n";
+        return 1;
+    }
 }

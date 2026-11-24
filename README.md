@@ -58,7 +58,7 @@ For $l_{\max} = 14$, this yields 225 orbital weight coefficients per bubble.
 
 ### Output Format
 
-The output CSV matches the format produced by the original Python pipeline, with columns:
+The output CSV has these columns:
 
 | Column | Description |
 |--------|-------------|
@@ -68,10 +68,12 @@ The output CSV matches the format produced by the original Python pipeline, with
 | `sim` | Simulation label derived from grid and bubble properties |
 | `bub_num` | Bubble index within the frame (0-based) |
 | `time [s]` | Simulation time, rounded to $10^{-5}$ s |
-| `pos_x`, `pos_y`, `pos_z` | Bounding-box centre of the bubble mesh |
-| `vel_x`, `vel_y`, `vel_z` | Forward-difference velocity (0 for last timestep) |
+| `pos_x`, `pos_y`, `pos_z` | Bounding-box centre of the bubble mesh, including the window shift (absolute position) |
+| `vel_x`, `vel_y`, `vel_z` | Absolute velocity: forward difference of `pos_*` between dumps (empty for the last dump of each converter run) |
 | `l_max` | Maximum SH degree used |
 | `orb_0` … `orb_224` | Real spherical harmonic weight coefficients |
+
+Existing CSVs with other columns (for example another `--lmax`) are not appended to. CSVs from versions without the window-shift correction have the same columns but window-relative `pos_*` and `vel_*`: do not append to them.
 
 ---
 

@@ -25,7 +25,10 @@ while true; do
         done
 
         # Run the C++ converter
-        "$CONVERTER" --input ./input --output ./output --lmax 14
+        if ! "$CONVERTER" --input ./input --output ./output --lmax 14; then
+            echo "Conversion failed, keeping dumps in ./input"
+            exit 1
+        fi
 
         rm ./input/*
     else

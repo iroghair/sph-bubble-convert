@@ -26,6 +26,7 @@ struct Bubble {
 struct Ft3Frame {
     int    cycle;
     double time;   // raw time in seconds (NOT rounded)
+    std::array<double, 3> origin_shift;  // accumulated window shift
     int    nx, ny, nz;
     double dx, dy, dz;
     int    nph, neli;
@@ -67,7 +68,7 @@ inline Ft3Frame load_ft3(const std::string& path)
     fr.cycle = ft3_int(f);
     ft3_skip(f, 4);               // dummy int
     fr.time  = ft3_double(f);
-    ft3_skip(f, 24);              // originshift: 3 doubles
+    for (auto& s : fr.origin_shift) s = ft3_double(f);
 
     // Grid dimensions
     fr.nx = ft3_int(f);  ft3_skip(f, 4);
