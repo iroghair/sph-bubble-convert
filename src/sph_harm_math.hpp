@@ -166,44 +166,80 @@ struct SHNormTable {
     }
 };
 
-// Compute all sph_legendre(l, m, phi) for a single point via recurrence.
-// Stores results in leg[l][m] for m = 0..l.
-inline void compute_legendre_recurrence(
-    double phi,
-    int l_max,
-    const SHNormTable& ntab,
-    std::vector<std::vector<double>>& leg)
-{
-    const double cos_phi = std::cos(phi);
-    const double sin_phi = std::sin(phi);
+// Evaluates the basis for blocks of points (recurrence method); same arithmetic
+// per point as before, but all points of a block at once, so it vectorises.
+class SphBlock {
+public:
+    static constexpr int SIZE = 128;   // points per block: fits in L2 cache
 
-    // Sectoral: P_m^m
-    double pmm = 1.0;
-    leg[0][0] = ntab.norm[0][0] * pmm;
-
-    for (int m = 1; m <= l_max; ++m) {
-        pmm *= -(2 * m - 1) * sin_phi;
-        leg[m][m] = ntab.norm[m][m] * pmm;
+    explicit SphBlock(int l_max)
+        : l_max_(l_max), norm_(l_max), a_(index(l_max, l_max) + 1),
+          b_(a_.size()), leg_(SIZE, a_.size()), cos_(SIZE, l_max + 1),
+          sin_(SIZE, l_max + 1)
+    {
+        for (int l = 1; l <= l_max; ++l)
+            for (int m = 0; m < l; ++m) {
+                const double l2 = static_cast<double>(l) * l;
+                const double m2 = static_cast<double>(m) * m;
+                a_[index(l, m)] = std::sqrt((4.0 * l2 - 1.0) / (l2 - m2));
+                if (m <= l - 2)
+                    b_[index(l, m)] = std::sqrt(((2.0*l + 1.0) * ((l-1.0)*(l-1.0) - m2)) /
+                                                ((2.0*l - 3.0) * (l2 - m2)));
+            }
     }
 
-    // Tesseral: upward recurrence in l using normalized form
-    //   sph_leg(l,m) = a*cos_phi*sph_leg(l-1,m) - b*sph_leg(l-2,m)
-    for (int m = 0; m <= l_max; ++m) {
-        if (m + 1 <= l_max) {
-            double a = std::sqrt((4.0*(m+1)*(m+1) - 1.0) /
-                                 ((m+1.0)*(m+1.0) - m*m));
-            leg[m+1][m] = a * cos_phi * leg[m][m];
+    // First n rows of out (n <= SIZE): the basis at these points
+    template <class Matrix>
+    void fill(const double* theta, const double* phi, int n, Matrix&& out)
+    {
+        Eigen::Array<double, SIZE, 1> cp, sp, pmm;
+        for (int k = 0; k < n; ++k) {
+            cp[k] = std::cos(phi[k]);
+            sp[k] = std::sin(phi[k]);
+            cos_(k, 0) = 1.0;
+            sin_(k, 0) = 0.0;
+            if (l_max_ >= 1) {
+                cos_(k, 1) = std::cos(theta[k]);
+                sin_(k, 1) = std::sin(theta[k]);
+            }
         }
-        for (int l = m + 2; l <= l_max; ++l) {
-            double l2 = static_cast<double>(l) * l;
-            double m2 = static_cast<double>(m) * m;
-            double a = std::sqrt((4.0 * l2 - 1.0) / (l2 - m2));
-            double b = std::sqrt(((2.0*l + 1.0) * ((l-1.0)*(l-1.0) - m2)) /
-                                 ((2.0*l - 3.0) * (l2 - m2)));
-            leg[l][m] = a * cos_phi * leg[l-1][m] - b * leg[l-2][m];
+        const auto c1 = cp.head(n);
+        for (int m = 2; m <= l_max_; ++m) {
+            cos_.col(m).head(n) = 2.0 * cos_.col(1).head(n) * cos_.col(m-1).head(n) - cos_.col(m-2).head(n);
+            sin_.col(m).head(n) = 2.0 * cos_.col(1).head(n) * sin_.col(m-1).head(n) - sin_.col(m-2).head(n);
+        }
+
+        // Sectoral P_m^m, then upward recurrence in l
+        pmm.head(n).setOnes();
+        for (int m = 0; m <= l_max_; ++m) {
+            if (m > 0) pmm.head(n) *= -static_cast<double>(2 * m - 1) * sp.head(n);
+            leg_.col(index(m, m)).head(n) = norm_.norm[m][m] * pmm.head(n);
+            if (m + 1 <= l_max_)
+                leg_.col(index(m+1, m)).head(n) = a_[index(m+1, m)] * c1 * leg_.col(index(m, m)).head(n);
+            for (int l = m + 2; l <= l_max_; ++l)
+                leg_.col(index(l, m)).head(n) =
+                    a_[index(l, m)] * c1 * leg_.col(index(l-1, m)).head(n)
+                    - b_[index(l, m)] * leg_.col(index(l-2, m)).head(n);
+        }
+
+        for (int l = 0; l <= l_max_; ++l) {
+            const int c = l * l + l;
+            out.col(c).head(n) = leg_.col(index(l, 0)).head(n).matrix();
+            for (int m = 1; m <= l; ++m) {
+                const double s = (m % 2 == 0 ? -1.0 : 1.0) * M_SQRT2;
+                out.col(c + m).head(n) = (M_SQRT2 * leg_.col(index(l, m)).head(n) * cos_.col(m).head(n)).matrix();
+                out.col(c - m).head(n) = (s * leg_.col(index(l, m)).head(n) * sin_.col(m).head(n)).matrix();
+            }
         }
     }
-}
+
+private:
+    static int index(int l, int m) { return l * (l + 1) / 2 + m; }
+    int l_max_;
+    SHNormTable norm_;
+    std::vector<double> a_, b_;
+    Eigen::ArrayXXd leg_, cos_, sin_;
+};
 
 // --- Public interface -------------------------------------------------------
 
@@ -217,10 +253,16 @@ inline Eigen::MatrixXd build_sph_matrix(
     const int num_orbs = (l_max + 1) * (l_max + 1);
     Eigen::MatrixXd A(N, num_orbs);
 
-    const auto orbs = make_orb_table(l_max);
+    if (method == LegendreMethod::RECURRENCE) {
+        SphBlock block(l_max);
+        for (int k = 0; k < N; k += SphBlock::SIZE) {
+            const int n = std::min(SphBlock::SIZE + 0, N - k);
+            block.fill(&theta_az[k], &phi_pol[k], n, A.middleRows(k, n));
+        }
+        return A;
+    }
 
-    // Normalization table (only needed for recurrence, but cheap to build)
-    SHNormTable ntab(l_max);
+    const auto orbs = make_orb_table(l_max);
 
     // Per-point scratch: leg[l][m] for m = 0..l
     std::vector<std::vector<double>> leg(l_max + 1);
@@ -233,16 +275,7 @@ inline Eigen::MatrixXd build_sph_matrix(
         const double phi   = phi_pol[k];
         const double theta = theta_az[k];
 
-        // Compute Legendre values using the selected method
-        switch (method) {
-        case LegendreMethod::STD:
-            detail::compute_legendre_std(phi, l_max, orbs, leg);
-            break;
-        case LegendreMethod::RECURRENCE:
-            compute_legendre_recurrence(phi, l_max, ntab, leg);
-            break;
-        }
-
+        detail::compute_legendre_std(phi, l_max, orbs, leg);
         trig_multiples(theta, l_max, cos_mt, sin_mt);
         fill_row(A, k, orbs, leg, cos_mt, sin_mt);
     }
@@ -253,9 +286,18 @@ inline Eigen::MatrixXd build_sph_matrix(
 //  Least-squares solver: find x that minimises ||A·x − b||²
 //  Uses Eigen BDCSVD — equivalent to numpy.linalg.lstsq(A, b, rcond=None).
 // ----------------------------------------------------------------------------
-inline Eigen::VectorXd lstsq(const Eigen::MatrixXd& A, const Eigen::VectorXd& b)
+inline Eigen::VectorXd lstsq(const Eigen::MatrixXd& A, const Eigen::VectorXd& b,
+                             double* rcond = nullptr)   // 1/condition number of A^T A
 {
-    return A.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV).solve(b);
+    const auto svd = A.bdcSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
+    if (svd.info() != Eigen::Success)
+        throw std::runtime_error("SVD did not converge");
+    if (rcond) {
+        const auto& sv = svd.singularValues();   // decreasing
+        const double q = sv[sv.size() - 1] / sv[0];
+        *rcond = q * q;
+    }
+    return svd.solve(b);
 }
 
 // ----------------------------------------------------------------------------

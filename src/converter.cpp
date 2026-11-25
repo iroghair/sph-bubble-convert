@@ -7,7 +7,7 @@
 //    stl_2_sph_harm_new.py  (STL → CSV with SH weights)
 //
 //  Usage:
-//    ./converter --input <dir> --output <dir> [--lmax 14] [--legendre std|recurrence] [--threads N]
+//    ./converter --input <dir> --output <dir> [--lmax 14] [--legendre std|recurrence] [--solver auto|svd] [--threads N]
 //
 //  Input  directory: flat folder containing *.ft3 files (same as convert_dir)
 //  Output directory: CSVs written here as <folder_name>.csv
@@ -51,6 +51,7 @@ struct Config {
     std::string     output_dir;
     int             l_max = 14;
     int             legendre = SPH_LEGENDRE_RECURRENCE;
+    int             solver = SPH_SOLVER_AUTO;
     int             threads = 0;  // 0 = let OpenMP decide
 };
 
@@ -77,12 +78,20 @@ static Config parse_args(int argc, char** argv)
                 std::exit(1);
             }
         }
+        else if (arg == "--solver" && i + 1 < argc) {
+            std::string val = argv[++i];
+            if (val != "auto" && val != "svd") {
+                std::cerr << "Unknown solver: " << val << " (use 'auto' or 'svd')\n";
+                std::exit(1);
+            }
+            cfg.solver = val == "svd" ? SPH_SOLVER_SVD : SPH_SOLVER_AUTO;
+        }
         else if ((arg == "--threads" || arg == "-t") && i + 1 < argc)
             cfg.threads = std::stoi(argv[++i]);
         else {
             std::cerr << "Unknown argument: " << arg << "\n";
             std::cerr << "Usage: converter --input <dir> --output <dir> "
-                         "[--lmax 14] [--legendre std|recurrence] [--threads N]\n";
+                         "[--lmax 14] [--legendre std|recurrence] [--solver auto|svd] [--threads N]\n";
             std::exit(1);
         }
     }
@@ -92,7 +101,7 @@ static Config parse_args(int argc, char** argv)
     }
     if (cfg.input_dir.empty() || cfg.output_dir.empty()) {
         std::cerr << "Usage: converter --input <dir> --output <dir> "
-                     "[--lmax 14] [--legendre std|recurrence] [--threads N]\n";
+                     "[--lmax 14] [--legendre std|recurrence] [--solver auto|svd] [--threads N]\n";
         std::exit(1);
     }
     return cfg;
@@ -131,7 +140,7 @@ static void set_position(BubbleResult& res, const double* ctr,
 static std::vector<BubbleResult> process_frame(
     const Ft3Frame& fr, int l_max,
     const std::string& folder_name,
-    int legendre)
+    int legendre, int solver, int& not_fitted)
 {
     const int num_orbs = (l_max + 1) * (l_max + 1);
     const int time_rounded = static_cast<int>(std::round(fr.time * 1e5));
@@ -140,29 +149,32 @@ static std::vector<BubbleResult> process_frame(
     // Preallocate result slots so threads can write independently
     std::vector<BubbleResult> results(fr.neli);
 
-    int failed = 0;
-
     #pragma omp parallel for schedule(dynamic)
     for (int bi = 0; bi < fr.neli; ++bi) {
         const Bubble& bub = fr.bubbles[bi];
 
         double ctr[3];
+        sph_info info;
         std::vector<double> weights(num_orbs);
         const int status = sph_fit(
             reinterpret_cast<const double*>(bub.positions.data()),
-            static_cast<int>(bub.positions.size()), l_max, legendre, ctr,
-            weights.data());
+            static_cast<int>(bub.positions.size()), l_max, legendre, solver,
+            ctr, weights.data(), &info);
 
-        if (status == SPH_TOO_FEW_POINTS) {
+        // No good fit: the row is still written (see sph_fit.h for the weights)
+        if (status != SPH_OK || (solver == SPH_SOLVER_AUTO && info.solver == 1)) {
             #pragma omp critical
-            std::cerr << "[WARN] bubble " << bi
-                      << " at t=" << fr.time
-                      << " has too few vertices (" << bub.positions.size()
-                      << "), skipping SH fit.\n";   // recorded with zero weights
-        } else if (status != SPH_OK) {
-            #pragma omp atomic
-            ++failed;   // no exceptions out of a parallel region
-            continue;
+            {
+                std::cerr << "[WARN] bubble " << bi << " at t=" << fr.time << ": ";
+                if (status == SPH_OK) {
+                    std::cerr << "SVD used instead of Cholesky (rcond "
+                              << info.rcond << ")\n";
+                } else {
+                    std::cerr << sph_status_text(status) << " ("
+                              << bub.positions.size() << " vertices)\n";
+                    ++not_fitted;
+                }
+            }
         }
 
         BubbleResult& res = results[bi];
@@ -177,10 +189,6 @@ static std::vector<BubbleResult> process_frame(
         res.l_max = l_max;
         res.weights = std::move(weights);
     }
-    if (failed)
-        throw std::runtime_error(
-            std::to_string(failed) + " bubble(s) cannot be fitted: coordinates "
-            "not finite, or out of memory");
     return results;
 }
 
@@ -341,6 +349,7 @@ static int run(int argc, char** argv)
     std::vector<BubbleResult> all_records;
     all_records.reserve(ft3_files.size() * 32);  // estimated
 
+    int not_fitted = 0;
     const auto t_start = std::chrono::steady_clock::now();
 
     for (const auto& fp : ft3_files) {
@@ -350,7 +359,8 @@ static int run(int argc, char** argv)
         Ft3Frame fr = load_ft3(fp.string());
 
         auto frame_results = process_frame(fr, cfg.l_max, folder_name,
-                                             cfg.legendre);
+                                             cfg.legendre, cfg.solver,
+                                             not_fitted);
         all_records.insert(all_records.end(),
                            std::make_move_iterator(frame_results.begin()),
                            std::make_move_iterator(frame_results.end()));
@@ -370,6 +380,8 @@ static int run(int argc, char** argv)
     const auto t_end = std::chrono::steady_clock::now();
     const double total_s = std::chrono::duration<double>(t_end - t_start).count();
 
+    if (not_fitted)
+        std::cerr << "[WARN] " << not_fitted << " bubble(s) without a good fit, see above\n";
     std::cout << "\nDone. Output: " << csv_path << "\n";
     std::cout << "Total wall time: " << std::fixed << std::setprecision(2)
               << total_s << " s\n";

@@ -31,7 +31,7 @@ This approach suffered from heavy I/O overhead (thousands of intermediate STL fi
 The converter eliminates these bottlenecks by:
 
 - **Skipping intermediate files entirely** — FT3 binary data is parsed directly into memory and processed without writing STL files to disk.
-- **Using optimised numerics** — Real SH basis functions are computed via a recurrence relation for associated Legendre polynomials (or optionally via `std::sph_legendre`). Least-squares fitting uses Eigen's BDCSVD solver.
+- **Using optimised numerics** — Real SH basis functions are computed via a recurrence relation for associated Legendre polynomials (or optionally via `std::sph_legendre`). Least-squares fitting uses a Cholesky decomposition of the normal equations, about 11 times faster than SVD and the same weights within 1e-13 of `orb_0`; SVD (Eigen's BDCSVD) is the fallback.
 - **Parallelising across bubbles** — Each bubble's SH fit is independent; OpenMP distributes them across available cores.
 
 ### Mathematical Convention
@@ -162,6 +162,7 @@ Expected output: position and weight differences on the order of $10^{-16}$ (PAS
 | `--output` | `-o` | (required) | Directory for output CSV(s) |
 | `--lmax` | `-l` | `14` | Maximum spherical harmonic degree |
 | `--legendre` | | `recurrence` | Legendre computation method: `std` or `recurrence` |
+| `--solver` | | `auto` | `auto`: Cholesky of the normal equations, SVD if that is not accurate (with a warning). `svd`: always SVD |
 | `--threads` | `-t` | (auto) | Number of OpenMP threads (0 = system default) |
 
 #### Examples
@@ -197,9 +198,9 @@ The `scripts/script.sh` shell script provides a polling loop that watches for ne
 | File | Description |
 |------|-------------|
 | `src/converter.cpp` | Main application. Parses CLI arguments, iterates over `.ft3` files, calls `sph_fit()` per bubble (parallelised with OpenMP), computes inter-frame velocities via forward differencing, and writes the output CSV. |
-| `src/sph_fit.h`, `src/sph_fit.cpp` | Fit of one bubble as a library with a C interface (`libsphfit.a`): points in, centre and weights out. Used by the converter; other programs can call it without `.ft3` files. Thread safe, starts no threads. |
+| `src/sph_fit.h`, `src/sph_fit.cpp` | Fit of one bubble as a library with a C interface (`libsphfit.a`): points in, centre, weights, status and fit error out. Never stops the calling program. Used by the converter; other programs can call it without `.ft3` files. Thread safe, starts no threads. |
 | `src/ft3_reader.hpp` | Header-only FT3 binary parser. Reads the file header (cycle, time, grid dimensions), skips Eulerian field arrays, and extracts per-bubble vertex positions and triangular face connectivity via bulk reads. Also provides geometry helpers: mesh volume/area (signed tetrahedron method), volume-equivalent diameter, and the folder-naming convention. |
-| `src/sph_harm_math.hpp` | Header-only spherical harmonic library. Provides: the `real_Y_lm()` scalar function; `build_sph_matrix()` to construct the $N \times (l_{\max}+1)^2$ design matrix; `lstsq()` for Eigen BDCSVD least-squares solving; `cart2sph()` for coordinate conversion. Supports two Legendre back-ends selectable via `LegendreMethod` enum — `STD` (delegates to `std::sph_legendre`) and `RECURRENCE` (local implementation using sectoral/tesseral recurrence with precomputed normalisation). |
+| `src/sph_harm_math.hpp` | Header-only spherical harmonic library. Provides: the `real_Y_lm()` scalar function; `build_sph_matrix()` to construct the $N \times (l_{\max}+1)^2$ design matrix; `lstsq()` for Eigen BDCSVD least-squares solving; `cart2sph()` for coordinate conversion. Supports two Legendre back-ends selectable via `LegendreMethod` enum — `STD` (delegates to `std::sph_legendre`) and `RECURRENCE` (local implementation using sectoral/tesseral recurrence with precomputed normalisation, for blocks of points). |
 | `src/validate_sph.cpp` | Standalone validation program. Evaluates all 225 real SH basis functions at 8 fixed test points and writes the results to `/tmp/cpp_sph_values.csv` for comparison against Python. |
 | `Makefile` | Build rules for `bin/converter` and `bin/validate_sph`. Flags: `-O3 -std=c++17 -fopenmp -I/usr/include/eigen3`. |
 
