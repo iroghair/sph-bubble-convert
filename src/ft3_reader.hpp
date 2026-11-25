@@ -161,20 +161,6 @@ inline std::pair<double,double> mesh_volume_area(const Bubble& b)
     return { std::abs(vol), area };
 }
 
-// Bounding-box center — matches PyVista PolyData.center
-inline std::array<double,3> bbox_center(const Bubble& b)
-{
-    double xlo =  1e300, xhi = -1e300;
-    double ylo =  1e300, yhi = -1e300;
-    double zlo =  1e300, zhi = -1e300;
-    for (const auto& p : b.positions) {
-        xlo = std::min(xlo, p[0]);  xhi = std::max(xhi, p[0]);
-        ylo = std::min(ylo, p[1]);  yhi = std::max(yhi, p[1]);
-        zlo = std::min(zlo, p[2]);  zhi = std::max(zhi, p[2]);
-    }
-    return { (xlo+xhi)/2.0, (ylo+yhi)/2.0, (zlo+zhi)/2.0 };
-}
-
 // Volume-equivalent diameter [m]
 inline double volume_diameter(double volume)
 {

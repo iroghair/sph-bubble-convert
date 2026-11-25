@@ -40,11 +40,13 @@ The real spherical harmonic basis follows the same convention as `scipy.special.
 
 $$
 Y_l^m(\theta, \phi) = \begin{cases}
-\sqrt{2} \cdot \text{Im}(Y_l^{|m|}) & m < 0 \\
+\sqrt{2} \cdot \text{Im}(Y_l^{m}) & m < 0 \\
 Y_l^0 & m = 0 \\
 \sqrt{2} \cdot \text{Re}(Y_l^m) & m > 0
 \end{cases}
 $$
+
+For $m < 0$ this is the harmonic with the negative $m$, not $|m|$: the sign differs for even $m$.
 
 where $\theta$ is the azimuthal angle (longitude, $0 \ldots 2\pi$) and $\phi$ is the polar angle (colatitude, $0 \ldots \pi$).
 
@@ -99,6 +101,8 @@ This produces two executables in `bin/`:
 - `bin/converter` — the main FT3-to-CSV pipeline
 - `bin/validate_sph` — standalone SH math validation tool
 
+and the library `bin/libsphfit.a` (interface: `src/sph_fit.h`).
+
 To build only the converter:
 
 ```bash
@@ -126,6 +130,8 @@ python3 tests/validate_sph_harm.py
 ```
 
 Expected output: maximum absolute difference on the order of $10^{-15}$ (machine epsilon).
+
+`make test` checks the C interface of the fit library with known shapes.
 
 #### 2. Full Pipeline Validation
 
@@ -190,8 +196,9 @@ The `scripts/script.sh` shell script provides a polling loop that watches for ne
 
 | File | Description |
 |------|-------------|
-| `src/converter.cpp` | Main application. Parses CLI arguments, iterates over `.ft3` files, calls `process_frame()` for SH fitting (parallelised with OpenMP), computes inter-frame velocities via forward differencing, and writes the output CSV. |
-| `src/ft3_reader.hpp` | Header-only FT3 binary parser. Reads the file header (cycle, time, grid dimensions), skips Eulerian field arrays, and extracts per-bubble vertex positions and triangular face connectivity via bulk reads. Also provides geometry helpers: bounding-box centre, mesh volume/area (signed tetrahedron method), volume-equivalent diameter, and the folder-naming convention. |
+| `src/converter.cpp` | Main application. Parses CLI arguments, iterates over `.ft3` files, calls `sph_fit()` per bubble (parallelised with OpenMP), computes inter-frame velocities via forward differencing, and writes the output CSV. |
+| `src/sph_fit.h`, `src/sph_fit.cpp` | Fit of one bubble as a library with a C interface (`libsphfit.a`): points in, centre and weights out. Used by the converter; other programs can call it without `.ft3` files. Thread safe, starts no threads. |
+| `src/ft3_reader.hpp` | Header-only FT3 binary parser. Reads the file header (cycle, time, grid dimensions), skips Eulerian field arrays, and extracts per-bubble vertex positions and triangular face connectivity via bulk reads. Also provides geometry helpers: mesh volume/area (signed tetrahedron method), volume-equivalent diameter, and the folder-naming convention. |
 | `src/sph_harm_math.hpp` | Header-only spherical harmonic library. Provides: the `real_Y_lm()` scalar function; `build_sph_matrix()` to construct the $N \times (l_{\max}+1)^2$ design matrix; `lstsq()` for Eigen BDCSVD least-squares solving; `cart2sph()` for coordinate conversion. Supports two Legendre back-ends selectable via `LegendreMethod` enum — `STD` (delegates to `std::sph_legendre`) and `RECURRENCE` (local implementation using sectoral/tesseral recurrence with precomputed normalisation). |
 | `src/validate_sph.cpp` | Standalone validation program. Evaluates all 225 real SH basis functions at 8 fixed test points and writes the results to `/tmp/cpp_sph_values.csv` for comparison against Python. |
 | `Makefile` | Build rules for `bin/converter` and `bin/validate_sph`. Flags: `-O3 -std=c++17 -fopenmp -I/usr/include/eigen3`. |

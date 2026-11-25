@@ -35,10 +35,11 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "ft3_reader.hpp"
-#include "sph_harm_math.hpp"
+#include "sph_fit.h"
 
 namespace fs = std::filesystem;
 
@@ -49,7 +50,7 @@ struct Config {
     std::string     input_dir;
     std::string     output_dir;
     int             l_max = 14;
-    LegendreMethod  legendre = LegendreMethod::RECURRENCE;
+    int             legendre = SPH_LEGENDRE_RECURRENCE;
     int             threads = 0;  // 0 = let OpenMP decide
 };
 
@@ -67,9 +68,9 @@ static Config parse_args(int argc, char** argv)
         else if (arg == "--legendre" && i + 1 < argc) {
             std::string val = argv[++i];
             if (val == "std")
-                cfg.legendre = LegendreMethod::STD;
+                cfg.legendre = SPH_LEGENDRE_STD;
             else if (val == "recurrence")
-                cfg.legendre = LegendreMethod::RECURRENCE;
+                cfg.legendre = SPH_LEGENDRE_RECURRENCE;
             else {
                 std::cerr << "Unknown legendre method: " << val
                           << " (use 'std' or 'recurrence')\n";
@@ -84,6 +85,10 @@ static Config parse_args(int argc, char** argv)
                          "[--lmax 14] [--legendre std|recurrence] [--threads N]\n";
             std::exit(1);
         }
+    }
+    if (cfg.l_max < 0 || cfg.l_max > SPH_MAX_LMAX) {
+        std::cerr << "--lmax must be 0 to " << SPH_MAX_LMAX << "\n";
+        std::exit(1);
     }
     if (cfg.input_dir.empty() || cfg.output_dir.empty()) {
         std::cerr << "Usage: converter --input <dir> --output <dir> "
@@ -115,7 +120,7 @@ struct BubbleResult {
 //  Process a single FT3 frame → vector of BubbleResult
 // ============================================================================
 // Absolute position: mesh coordinates are relative to the (shifting) window
-static void set_position(BubbleResult& res, const std::array<double, 3>& ctr,
+static void set_position(BubbleResult& res, const double* ctr,
                          const Ft3Frame& fr)
 {
     res.pos_x = ctr[0] + fr.origin_shift[0];
@@ -126,7 +131,7 @@ static void set_position(BubbleResult& res, const std::array<double, 3>& ctr,
 static std::vector<BubbleResult> process_frame(
     const Ft3Frame& fr, int l_max,
     const std::string& folder_name,
-    LegendreMethod legendre_method = LegendreMethod::RECURRENCE)
+    int legendre)
 {
     const int num_orbs = (l_max + 1) * (l_max + 1);
     const int time_rounded = static_cast<int>(std::round(fr.time * 1e5));
@@ -135,63 +140,31 @@ static std::vector<BubbleResult> process_frame(
     // Preallocate result slots so threads can write independently
     std::vector<BubbleResult> results(fr.neli);
 
+    int failed = 0;
+
     #pragma omp parallel for schedule(dynamic)
     for (int bi = 0; bi < fr.neli; ++bi) {
         const Bubble& bub = fr.bubbles[bi];
 
-        // --- 1. Bounding-box center (= PyVista PolyData.center) ---------------
-        auto ctr = bbox_center(bub);
+        double ctr[3];
+        std::vector<double> weights(num_orbs);
+        const int status = sph_fit(
+            reinterpret_cast<const double*>(bub.positions.data()),
+            static_cast<int>(bub.positions.size()), l_max, legendre, ctr,
+            weights.data());
 
-        // --- 2. Translate vertices to origin ----------------------------------
-        std::vector<double> theta_az, phi_pol, r_vals;
-        theta_az.reserve(bub.positions.size());
-        phi_pol .reserve(bub.positions.size());
-        r_vals  .reserve(bub.positions.size());
-
-        for (const auto& p : bub.positions) {
-            const double X = p[0] - ctr[0];
-            const double Y = p[1] - ctr[1];
-            const double Z = p[2] - ctr[2];
-            auto sph = cart2sph(X, Y, Z);
-            // Skip degenerate vertices (at the exact centroid)
-            if (sph.r < 1e-20) continue;
-            theta_az.push_back(sph.theta_az);
-            phi_pol .push_back(sph.phi_pol);
-            r_vals  .push_back(sph.r);
-        }
-
-        // Guard against degenerate bubbles
-        if (static_cast<int>(r_vals.size()) < num_orbs) {
+        if (status == SPH_TOO_FEW_POINTS) {
             #pragma omp critical
             std::cerr << "[WARN] bubble " << bi
                       << " at t=" << fr.time
-                      << " has too few vertices (" << r_vals.size()
-                      << "), skipping SH fit.\n";
-            // Still record with zero weights
-            BubbleResult& res = results[bi];
-            res.id = folder_name + "_" + std::to_string(bi);
-            res.stl = "data/bubbles_stl/" + folder_name + "/F" +
-                       std::to_string(time_rounded) + "_bubble_" +
-                       std::to_string(bi) + ".stl";
-            res.sim = folder_name;
-            res.bub_num = bi;
-            res.time_s = time_s;
-            set_position(res, ctr, fr);
-            res.l_max = l_max;
-            res.weights.assign(num_orbs, 0.0);
+                      << " has too few vertices (" << bub.positions.size()
+                      << "), skipping SH fit.\n";   // recorded with zero weights
+        } else if (status != SPH_OK) {
+            #pragma omp atomic
+            ++failed;   // no exceptions out of a parallel region
             continue;
         }
 
-        // --- 3. Build SH design matrix and solve lstsq ------------------------
-        const Eigen::MatrixXd A = build_sph_matrix(theta_az, phi_pol,
-                                                    l_max, legendre_method);
-        const int N = static_cast<int>(r_vals.size());
-        Eigen::VectorXd b(N);
-        for (int k = 0; k < N; ++k) b(k) = r_vals[k];
-
-        const Eigen::VectorXd w = lstsq(A, b);
-
-        // --- 4. Store result --------------------------------------------------
         BubbleResult& res = results[bi];
         res.id = folder_name + "_" + std::to_string(bi);
         res.stl = "data/bubbles_stl/" + folder_name + "/F" +
@@ -202,9 +175,12 @@ static std::vector<BubbleResult> process_frame(
         res.time_s = time_s;
         set_position(res, ctr, fr);
         res.l_max = l_max;
-        res.weights.resize(num_orbs);
-        for (int j = 0; j < num_orbs; ++j) res.weights[j] = w(j);
+        res.weights = std::move(weights);
     }
+    if (failed)
+        throw std::runtime_error(
+            std::to_string(failed) + " bubble(s) cannot be fitted: coordinates "
+            "not finite, or out of memory");
     return results;
 }
 
@@ -330,7 +306,7 @@ static int run(int argc, char** argv)
 #endif
 
     std::cout << "Legendre method: "
-              << (cfg.legendre == LegendreMethod::STD ? "std" : "recurrence")
+              << (cfg.legendre == SPH_LEGENDRE_STD ? "std" : "recurrence")
               << "\n";
 
     // Collect .ft3 files, sort by name for time-ordering
